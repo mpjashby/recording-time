@@ -1,0 +1,1235 @@
+---
+title             : "Topic 14.1: Recording time"
+shorttitle        : "Topic 14.1: Recording time"
+
+author: 
+  - name          : "Matthew P J Ashby"
+    affiliation   : "1"
+    corresponding : yes    # Define only one corresponding author
+    address       : "35 Tavistock Square, London WC1H 9EZ"
+    email         : "matthew.ashby@ucl.ac.uk"
+
+affiliation:
+  - id            : "1"
+    institution   : "Jill Dando Institute of Security and Crime Science, University College London"
+
+# keywords          : "keywords"
+wordcount         : "`r scales::comma(wordcountaddin::word_count())`"
+
+bibliography      : "../bibliography.bib"
+
+floatsintext      : yes
+figurelist        : no
+tablelist         : no
+footnotelist      : no
+linenumbers       : no
+mask              : no
+draft             : no
+
+documentclass     : "apa6"
+classoption       : "man,a4paper"
+header-includes:
+   - \usepackage{setspace}
+output            : papaja::apa6_pdf
+---
+
+
+```{r setup, include = FALSE}
+# load packages
+library("bookdown")
+library("cowplot")
+library("feasts")
+library("lubridate")
+library("papaja") # not on CRAN -- remotes::install_github("crsh/papaja")
+library("sf")
+library("tsibble")
+library("tidyverse")
+
+# suppress printing of code from code chunks
+knitr::opts_chunk$set(cache = TRUE, include = FALSE)
+
+# allow code chunks to have different font sizes
+# https://stackoverflow.com/a/46526740/8222654
+def.chunk.hook  <- knitr::knit_hooks$get("chunk")
+knitr::knit_hooks$set(chunk = function(x, options) {
+  x <- def.chunk.hook(x, options)
+  ifelse(
+    options$size != "normalsize", 
+    paste0("\n \\", options$size,"\n\n", x, "\n\n \\normalsize"), 
+    x
+  )
+})
+
+# load helpers
+source("../helpers.R")
+```
+
+```{r create functions, include = FALSE}
+ts_count <- function(data, var) {
+  as_tibble(fill_gaps(as_tsibble(count(data, {{var}}), index = {{var}})))
+}
+```
+
+
+```{r load data, include = FALSE}
+if (!file.exists(here::here("dc_crime_data.csv.gz"))) {
+  
+  # download data file
+  zip_file <- tempfile(fileext = ".zip")
+  download.file(
+    "https://github.com/ElizabethGroff/CrimeAndPlaceMethods/raw/master/WashingtonDC_Data/wash_dc_incidents_2016.zip", 
+    zip_file
+  )
+  unzip(zip_file, exdir = tempdir())
+  
+  # load file
+  data <- tempdir() %>% 
+    dir("wash_dc_incidents_2016.shp$", full.names = TRUE) %>% 
+    sf::read_sf() %>% 
+    sf::st_set_geometry(NULL) %>% 
+    as_tibble() %>% 
+    janitor::clean_names() %>% 
+    mutate(
+      from_date_time = parse_date_time(paste(from_date, from_time), "Ymd HM"),
+      to_date_time = parse_date_time(paste(to_date, to_time), "Ymd HM")
+    )
+  
+  # save data
+  write_csv(data, here::here("dc_crime_data.csv.gz"))
+  
+} else {
+  
+  data <- read_csv(here::here("dc_crime_data.csv.gz"))
+  
+}
+```
+
+
+```{r load district boundaries, include=FALSE}
+# get districts
+districts_file <- tempfile(fileext = ".zip")
+download.file(
+  "https://opendata.arcgis.com/datasets/d2a63e5246ff41bdaca8ea9be95c8a4b_9.zip",
+  districts_file
+)
+unzip(districts_file, exdir = tempdir())
+districts <- str_glue("{tempdir()}/Police_Districts.shp") %>% 
+  st_read() %>% 
+  # https://spatialreference.org/ref/epsg/nad83-maryland/
+  st_transform(102685)
+```
+
+\singlespacing
+\raggedbottom
+
+`r scales::comma(wordcountaddin::word_count())` words
+
+
+# Introduction
+
+Understanding how crime varies over time is just as important as understanding how it varies between places, both for theory and practice. For example, very few places are crime hotspots all the time – business districts that are hotspots of pickpocketing in the daytime might be deserted at night, while an entertainment district a few blocks away may be quiet in the daytime but a violence hotspot at night.
+
+Temporal variation in the frequency of crime is widespread. In many places, there will be long-term trends for particular types of crime. One example of this is the international crime drop that occurred in many countries from the 1990s onward [@Dijk:2012aa]. The consistency of this temporal trend across multiple countries is an important aspect of trying to understand what caused crime to fall so markedly [@Farrell:2013aa]. Trends also exist at smaller spatial scales: @Andresen:2017aa and @Weisburd:2004aa have identified that micro places such as street segments can have different trajectories of crime, which drive crime trends at larger spatial scales.
+
+```{r seasonal, include=TRUE, fig.cap="Weekly variation from the mean frequency of different crimes in Washington, DC, 2016"}
+seasonal <- data %>% 
+  filter(!offense %in% c("ARSON", "HOMICIDE", "SEX ABUSE")) %>% 
+  mutate(
+    offense = recode(
+      str_to_lower(offense),
+      "assault w/dangerous weapon" = "assault with a dangerous weapon",
+      "motor vehicle theft" = "theft of motor vehicle",
+      "theft f/auto" = "theft from motor vehicle",
+      "theft/other" = "other theft"
+    ),
+    week = yearweek(from_date)
+  ) %>% 
+  count(offense, week) %>% 
+  as_tsibble(index = week, key = offense) %>% 
+  fill_gaps(n = 0) %>% 
+  as_tibble() %>% 
+  group_by(offense) %>% 
+  mutate(
+    # calculate mean here because it is needed after ungroup() below
+    mean = mean(n),
+    diff = (n - mean) / mean,
+    # next line from https://stackoverflow.com/a/50759346/8222654
+    diff_ma = raster::movingFun(diff, 12, circular = TRUE),
+    sd = sd(n, na.rm = TRUE),
+    week = as_date(week)
+  ) %>% 
+  ungroup() %>% 
+  mutate(offense = str_glue("{offense} (mean = {scales::comma(mean)})"))
+
+plot_seasonal <- ggplot(seasonal, aes(week, diff)) +
+  geom_col(fill = "grey70") +
+  geom_line(aes(y = diff_ma, colour = "ma"), size = 0.5, 
+            key_glyph = "timeseries") +
+  scale_x_date(date_breaks = "2 months", date_labels = "%b") +
+  scale_y_continuous(
+    breaks = seq(-0.5, 0.5, by = 0.25),
+    labels = scales::percent_format(accuracy = 1)
+  ) +
+  scale_colour_manual(
+    values = c("ma" = "black"),
+    labels = c("ma" = "12-week center-weighted moving average")
+  ) +
+  facet_wrap(vars(offense), labeller = label_wrap_gen()) +
+  labs(
+    x = NULL, 
+    y = "difference between weekly count and mean weekly count",
+    colour = NULL
+  ) +
+  theme_ashby() +
+  theme(panel.grid.minor.y = element_blank())
+
+ggsave("figure_14-1.eps", plot_seasonal, width = 159, height = 159 * (2/3), 
+       units = "mm")
+
+knitr::include_graphics("figure_14-1.eps")
+```
+
+Non-trend temporal variations in crime can be divided into two categories: cyclical variations (such as seasonal patterns) and short-term fluctuations (including random variation). Figure \@ref(fig:seasonal) shows weekly counts of various crimes in Washington, DC, expressed as differences from the mean weekly count for each crime type. Some types of crime (such as assault with a dangerous weapon) exhibit strong seasonal patterns, while others (such as robbery) do not. There are also substantial short-term variations (what might be thought of as statistical noise).
+
+Focusing only on where crime happens, rather than thinking about when and where together, can easily lead to crime-prevention programs failing. Many police officers (the author included) have stories of being sent to patrol a hotspot at a time of day when no crimes had ever occurred there because a crime analyst or senior officer had analyzed where crimes concentrated, but not when. Equally, a theory that explains why crime concentrates in particular places but not at particular times is likely to be lacking in predictive power.
+
+
+```{r eval=FALSE}
+seasonal <- data %>% 
+  filter(!offense %in% c("ARSON")) %>% 
+  select(offense, from_date) %>% 
+  # convert dates to angles
+  mutate(angle = (yday(from_date) / max(yday(from_date))) * 360) %>% 
+  # nest data (rather than group) because number of crimes in each group is
+  # not equal to the number of density estimates
+  nest(dates = c(from_date, angle)) %>% 
+  mutate(
+    # convert angles to a circular density estimate
+    circular = map(dates, ~ circular(.$angle, units = "degrees", zero = pi/2,
+                                     rotation = "clock")),
+    density = map(circular, ~ density(., bw = bw.nrd.circular(.), adjust = 5, 
+                                      n = 366)),
+    # extract the angles at which the density estimates were made
+    density_x = map(density, ~ as.numeric(pluck(., "x"))),
+    # extract the density estimates
+    density_y = map(density, ~ as.numeric(pluck(., "y")))
+  ) %>% 
+  select(offense, density_x, density_y) %>% 
+  unnest(cols = c(density_x, density_y)) %>% 
+  mutate(
+    # correct these for circular.density() returning estimates in degrees but
+    # counting anti-clockwise starting from 90ª
+    density_x = ifelse(density_x < 0, density_x + 360, density_x),
+    yday = (density_x / 360) * max(yday(data$from_date)),
+    date = min(data$from_date) + days(round(yday))
+  ) %>% 
+  arrange(offense, date) %>% 
+  mutate(
+    offense = str_replace(str_replace(str_to_lower(offense), " w/", " with a "), 
+                          " f/", " from ")
+  )
+
+seasonal_mean <- seasonal %>% 
+  group_by(offense) %>% 
+  summarise(density_y = mean(density_y))
+
+ggplot(seasonal, aes(date, density_y)) +
+  geom_area(position = "identity") +
+  geom_hline(
+    aes(yintercept = density_y), 
+    data = seasonal_mean, 
+    colour = chart_elements$average_line_colour, 
+    linetype = chart_elements$average_line_linetype
+  ) +
+  scale_x_date(date_breaks = "2 months", date_labels = "%b") +
+  scale_y_continuous(limits = c(0, NA)) +
+  facet_wrap(vars(offense)) +
+  theme_ashby() +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.y = element_blank()
+  )
+```
+
+
+# Why studying temporal data can be challenging
+
+Temporal data can be challenging to work with for several reasons. One is that dates and times can be stored in so many formats: 17 January 1981 can be represented as 1/17/1981 in the United States, 17.01.81 in Germany or 17/01/1981 in France. Many of these formats can be ambiguous – does 10/02 represent 10 February or 2 October, or even the month of October 2002? A similar problem occurs with times: is 3.45 in the early hours of the morning or mid-afternoon? Analysis becomes more straightforward if dates and times are stored in an unambiguous format such as 1981-01-17 15:45<!-- YYYY-MM-DD HH:MM -->, where hours are represented using the 24-hour clock. Storing dates in other formats can lead to problems that can be hard to detect. Even if an analyst knows what a particular value is supposed to represent, collaborators or software may make different assumptions. For example, by default Microsoft Excel tries to guess (often incorrectly) whether numbers entered into a cell represent a date, and if so what format it is in.
+
+
+## Imprecision in temporal data
+
+```{r minutes, include=TRUE, fig.cap="Number of robberies reported in Washington, DC, 2016, by minute of the day"}
+plot_minutes <- data %>% 
+  filter(offense == "ROBBERY") %>% 
+  mutate(
+    from_time = parse_date_time(paste("2000-01-01", from_time), "Ymd HMS")
+  ) %>% 
+  count(from_time) %>% 
+  tsibble::as_tsibble(index = from_time) %>% 
+  tsibble::fill_gaps(n = 0) %>% 
+  as_tibble() %>% 
+  mutate(on_hour = factor(case_when(
+    str_detect(from_time, ":00:00$") ~ "on the hour",
+    str_detect(from_time, ":30:00$") ~ "on the half hour",
+    TRUE ~ "other"
+  ), levels = c("on the hour", "on the half hour", "other"))) %>% 
+  ggplot(aes(from_time, n, colour = on_hour, fill = on_hour)) + 
+  geom_point(shape = 21, size = 0.75) +
+  annotate(
+    "curve", 
+    x = ymd_hm("2000-01-01 03:15"), 
+    y = 22, 
+    xend = ymd_hm("2000-01-01 05:15"), 
+    yend = 22,
+    arrow = chart_elements$label_arrow,
+    colour = chart_elements$label_line_colour, 
+    curvature = chart_elements$label_line_curvature * -1
+  ) +
+  annotate(
+    "label", 
+    x = ymd_hm("2000-01-01 05:15"), 
+    y = 22, 
+    label = str_wrap(str_glue("robberies were much more likely to be ", 
+                              "recorded as occurring on the hour or half hour ",
+                              "than would be expected by chance"), 45), 
+    colour = chart_elements$label_text_colour, 
+    hjust = 0, 
+    label.size = NA,
+    lineheight = chart_elements$label_text_lineheight, 
+    size = chart_elements$label_text_size
+  ) +
+  scale_x_datetime(date_breaks = "1 hour", date_labels = "%H", 
+                   expand = expansion(mult = c(0.01, 0.01))) +
+  scale_y_continuous(
+    breaks = seq(0, 25, by = 5),
+    limits = c(0, NA),
+    expand = expansion(mult = c(0.02, 0.02))
+  ) +
+  scale_colour_manual(
+    name = "minute crime recorded as occurring: ",
+    values = c("on the hour" = "black", "on the half hour" = "grey60", 
+               "other" = "grey60")
+  ) +
+  scale_fill_manual(
+    name = "minute crime recorded as occurring: ",
+    values = c("on the hour" = "black", "on the half hour" = "grey60", 
+               "other" = "white")
+  ) +
+  theme_ashby() +
+  labs(
+    x = "time of day",
+    y = "number of robberies"
+  ) +
+  theme(
+    legend.background = element_rect(colour = NA, fill = "white"),
+    legend.direction = "horizontal",
+    legend.justification = c(0, 1),
+    legend.key.width = unit(0.5, "lines"),
+    legend.position = c(0.02, 1),
+    legend.text = element_text(size = 9),
+    legend.title = element_text(size = 9),
+    panel.grid.major.x = element_line(),
+    panel.grid.minor.x = element_line(linetype = "21"),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank()
+  )
+
+ggsave("figure_14-2.eps", plot_minutes, width = 159, height = 159 * 0.5, 
+       units = "mm")
+
+knitr::include_graphics("figure_14-2.eps")
+```
+
+```{r on-the-hour simulation prep}
+minute_counts <- data %>% 
+  filter(offense == "ROBBERY") %>% 
+  mutate(
+    from_time = parse_date_time(paste("2000-01-01", from_time), "Ymd HMS")
+  ) %>% 
+  count(from_time, name = "crimes") %>% 
+  tsibble::as_tsibble(index = from_time) %>% 
+  tsibble::fill_gaps(crimes = 0) %>% 
+  as_tibble()
+
+prob_on_hour <- minute_counts %>% 
+  mutate(on_hour = minute(from_time) == 0) %>% 
+  top_n(24, crimes) %>% 
+  count(on_hour) %>% 
+  mutate(prob = n / sum(n)) %>% 
+  filter(on_hour == TRUE) %>% 
+  pull(n)
+```
+
+```{r on-the-hour-simulation, include=FALSE, eval=FALSE}
+minute_simulations <- map_dfr(1:100000, function (i) {
+
+  minute_counts %>% 
+    # randomly order by-minute offense counts
+    mutate(order = runif(n())) %>% 
+    arrange(order) %>% 
+    # identify if offense occurred on the hour
+    mutate(minute = 1:(24 * 60) - 1, on_hour = minute %% 60 == 0) %>% 
+    # identify how many of the 24 minutes of the day with most offenses were
+    # on the hour
+    arrange(desc(crimes)) %>% 
+    mutate(rank = row_number()) %>% 
+    filter(rank <= 24) %>% 
+    count(on_hour)
+  
+}, .id = "iteration") %>% 
+  pivot_wider(names_from = on_hour, values_from = n) %>% 
+  replace_na(list(`TRUE` = 0, `FALSE` = 0)) %>% 
+  mutate(prob = `TRUE` / 24)
+
+summarise(mutate(minute_simulations, gt = `TRUE` >= prob_on_hour), gt = sum(gt) / n())
+
+quantile(minute_simulations$`TRUE`, c(0.975, 0.995, 0.9995))
+```
+
+
+Another problem with temporal data is that it is often imprecise. Some values (such as when a police dispatcher answered a call to 911) can be known to the second, but others (such as the time of death of a decomposed body) might only be known to the nearest day or week. A common example of this problem is in the times of crimes reported by victims. A person who has been robbed on the street might know it happened 'about a half-hour ago', but often will be much more ambiguous. This leads either victims or police officers to round-off the time at which they record a crime as occurring. Figure \@ref(fig:minutes) shows that robberies in Washington, DC are much more likely to be reported as having occurred on the hour or half hour than would be expected by chance. Of the `r scales::comma(24 * 60)` minutes of the day shown in Figure \@ref(fig:minutes), `r prob_on_hour` of the 24 minutes with most recorded robberies were on the hour. A Monte Carlo simulation suggests the likelihood of this occurring by chance is less than 1 in 100,000. An extreme version of the problem of ambiguous offense times is when a victim doesn't know when a crime occurred, only the earliest and latest times at which it could have occurred – dealing with this problem using aoristic analysis is the subject of Chapter 14.2.
+
+
+
+## Choosing a temporal scale
+
+One reason temporal data can be challenging is the complicated conceptual nature of time [@Wickham:2017ab]. In one sense, time is linear: the instant in time at `r strftime(now(), "%T on %A %e %B %Y")` will never be repeated in the Gregorian Calendar. But time also features multiple overlapping cycles: a `r scales::ordinal(as.numeric(strftime(now(), "%e")))` of `r strftime(now(), "%B")` happens every year, a `r scales::ordinal(day(now()))` day every month, `r strftime(now(), "%A")` every week, `r strftime(now(), "%H:%M")` every day and `r minute(now())` `r ifelse(minute(now()) == 1, "minute", "minutes")` past the hour every hour. There are also occasional exceptions to the general rhythms of time: February in some years has 29 days (and therefore the year 366 days); some days are only 23-hours long and others 25-hours long due to daylight savings changes. 
+
+```{r scales, include=TRUE, fig.cap="Number of thefts from automobiles in Washington, DC, 2016, using different temporal units of analysis"}
+auto_theft <- filter(data, offense == "THEFT F/AUTO")
+
+plot_year <- auto_theft %>% 
+  ts_count(from_date) %>% 
+  ggplot(aes(from_date, n)) +
+  geom_col(fill = "grey70", position = "identity", width = 1) +
+  geom_smooth(aes(colour = "black"), method = "loess", formula = "y ~ x", 
+              se = FALSE, span = 0.25, size = 0.5) +
+  scale_x_date(date_breaks = "1 month", date_labels = "%b", 
+               expand = expansion(mult = c(0.01, 0.01))) +
+  scale_y_continuous(limits = c(0, NA), n.breaks = 5, 
+                     expand = expansion(mult = c(0, 0))) +
+  scale_colour_manual(
+    values = c("black" = "black"),
+    labels = c("black" = "smoothed count of crimes")
+  ) +
+  labs(x = NULL, y = "number of crimes", colour = NULL) +
+  theme_ashby() +
+  theme(
+    axis.line.x = element_line(colour = "grey92"),
+    axis.text = element_text(size = rel(0.7)),
+    axis.title.y = element_text(hjust = 0),
+    legend.background = element_rect(size = 0, colour = NA, fill = "white"),
+    legend.position = c(0, 1),
+    legend.justification = c(0, 1),
+    panel.grid.major.x = element_line(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+plot_month <- auto_theft %>% 
+  mutate(date = as_date(from_date) - mday(from_date) + days(1)) %>% 
+  count(date) %>% 
+  ggplot(aes(date, n)) +
+  geom_col(fill = "grey70") +
+  scale_x_date(date_breaks = "2 months", date_labels = "%b", 
+               expand = expansion(mult = c(0.01, 0.02))) +
+  scale_y_continuous(limits = c(0, NA), labels = scales::comma_format(),
+                     expand = expansion(mult = c(0, 0))) +
+  labs(x = NULL, y = "number of crimes") +
+  theme_ashby() +
+  theme(
+    axis.line.x = element_line(colour = "grey92"),
+    axis.text = element_text(size = rel(0.7)),
+    axis.title.y = element_text(hjust = 0),
+    panel.grid.minor = element_blank()
+  )
+
+plot_day <- auto_theft %>% 
+  mutate(
+    weekday = wday(from_date, label = FALSE, week_start = 1),
+    # next line from https://stackoverflow.com/a/26129060/8222654
+    date = as.Date("1-1-2000","%u-%W-%Y") + days(weekday - 1)
+  ) %>% 
+  count(date) %>% 
+  ggplot(aes(date, n)) +
+  geom_col(fill = "grey70") +
+  scale_x_date(date_breaks = "1 day", date_labels = "%a", # labels = c("Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"), 
+               expand = expansion(mult = c(0.01, 0.02))) +
+  scale_y_continuous(limits = c(0, NA), labels = scales::comma_format(),
+                     expand = expansion(mult = c(0, 0))) +
+  labs(x = NULL, y = NULL) +
+  theme_ashby() +
+  theme(
+    axis.line.x = element_line(colour = "grey92"),
+    axis.text = element_text(size = rel(0.7)),
+    axis.title.y = element_text(hjust = 0),
+    panel.grid.minor = element_blank()
+  )
+
+plot_hour <- auto_theft %>% 
+  mutate(
+    date_time = ymd_h(paste("2000-01-01", hour(from_time))),
+    date_time = as_datetime(ifelse(hour(from_time) < 5, date_time + days(1),
+                                   date_time))
+  ) %>% 
+  count(date_time) %>% 
+  ggplot(aes(date_time, n)) +
+  geom_col(fill = "grey70") +
+  scale_x_datetime(
+    breaks = ymd_hm(c("2000-01-01 05:00", "2000-01-01 11:00", 
+                      "2000-01-01 17:00", "2000-01-01 23:00")), 
+    date_labels = "%H:%M",
+    expand = expansion(mult = c(0.01, 0.02))
+  ) +
+  scale_y_continuous(limits = c(0, NA), labels = scales::comma_format(),
+                     expand = expansion(mult = c(0, 0.2))) +
+  labs(x = NULL, y = NULL) +
+  theme_ashby() +
+  theme(
+    axis.line.x = element_line(colour = "grey92"),
+    axis.text = element_text(size = rel(0.7)),
+    axis.title.y = element_text(hjust = 0),
+    panel.grid.minor = element_blank()
+  )
+
+plot_day_hour <- auto_theft %>% 
+  mutate(
+    weekday = wday(from_date, label = FALSE, week_start = 1),
+    # next line from https://stackoverflow.com/a/26129060/8222654
+    date = as.Date("1-1-2000","%u-%W-%Y") + days(weekday - 1),
+    date_hour = parse_date_time(paste(date, hour(from_time)), "Ymd H")
+  ) %>% 
+  count(date_hour) %>% 
+  ggplot(aes(date_hour, n)) +
+  geom_col(fill = "grey70") +
+  scale_x_datetime(date_breaks = "1 day", date_labels = "%a", 
+                   expand = expansion(mult = c(0.01, 0.02))) +
+  scale_y_continuous(limits = c(0, NA), labels = scales::comma_format(),
+                     expand = expansion(mult = c(0, 0))) +
+  labs(x = NULL, y = "number of crimes") +
+  theme_ashby() +
+  theme(
+    axis.line.x = element_line(colour = "grey92"),
+    axis.text = element_text(size = rel(0.7)),
+    axis.title.y = element_text(hjust = 0),
+    panel.grid.major.x = element_line(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+plot_scales <- plot_grid(
+  plot_year, 
+  plot_grid(plot_month, plot_day, plot_hour, nrow = 1, 
+            labels = c("B", "C", "D"), label_fontface = "plain"), 
+  plot_day_hour,
+  nrow = 3, 
+  labels = c("A", "", "E"),
+  label_fontface = "plain"
+)
+
+ggsave("figure_14-3.eps", plot_scales, width = 159, height = 159 * 0.8, 
+       units = "mm")
+
+knitr::include_graphics("figure_14-3.eps")
+```
+
+
+These complications make it important to choose an appropriate temporal scale for analysis. Figure \@ref(fig:scales) shows the frequency of thefts from automobiles in Washington, DC, in 2016 using several different temporal scales. Panel A shows the daily frequency of thefts. 
+Panel B shows the same data, but aggregated to the month in which the crime occurred. This is a very-common way to present crime trends, but monthly counts should almost always be avoided. Not all months are the same length (March is `r scales::percent((31 - 28) / 28, accuracy = 1)` longer than February, for example), so it's likely that Panel B would show month-by-month variations in offenses even if crime was occurring at a constant rate. Months also don't include equal numbers of each day of the week, which can be important when (as shown in Panel C) crime is concentrated on certain days of the week. More-or-less the only reason to use monthly counts in studies of crime is if the data are only available in that format (e.g. administrative data that are published monthly). In all other cases, it is better to use weeks or multiples of weeks as a unit of analysis.
+
+Panel C of Figure \@ref(fig:scales) shows the number of thefts recorded on each day of the week. This makes it clear there is a weekly pattern in thefts, which (like many types of crime) peak on Fridays and Saturdays. This pattern is obscured by noise in Panel A, and hidden within the monthly counts of Panel B – it is often useful to visualize and test for patterns at multiple temporal scales.
+
+Panel D shows the number of thefts by hour of the day. The horizontal axis of this plot begins at 05:00, following the suggestion of @Felson:2003fu, since patterns of human activity rarely begin or end neatly at midnight. This shows that theft from automobiles has two peaks, one around midday and one around 18:00. Either side of this, the frequency of thefts gradually tails off. With a plot axis beginning at midnight, the increase before midday would have been obvious but it would have been easy to miss the gradual nature of the decrease after midnight, which would have been split between the two sides of the plot.
+
+Panel E also shows hourly crime counts, but for each hour of the week rather than hours of the day. Combining temporal units in this way can be useful to identify how (for example) hourly patterns can vary between days. This is particularly useful for crime types that are known to have different patterns on different days, such as fights in and around bars. This additional detail, however, comes at the cost of the statistical noise in the data being more apparent, which can make some trends more difficult to identify. Choosing the appropriate trade off between noise and temporal detail requires judgment, which can often be helped by experimenting with multiple temporal scales to find the best balance between different factors. It is also possible to use smoothing techniques such as moving averages or LOESS smoothing [@Buskirk:2013aa] to identify patterns amid noise, as shown in Panel A.
+
+The most-appropriate temporal scale also depends on the research question being asked. A project seeking to identify changes in crime over several years would have little use for hourly data, but might use weekly counts of crime or counts taken for 28-day periods (to avoid the problems associated with monthly periods). It is often worthwhile to consider using a smaller temporal unit than initial instinct might suggest, since (as can be seen by comparing panels C and E in Figure \@ref(fig:scales)) choosing a temporal scale that is too large risks ignoring important variations in data. This does not, however, simply mean plotting all the available data at the smallest available temporal scale -- the non-nested cycles seen in temporal data mean choosing a scale is more complicated than moving up and down the 'cone of resolution' for spatial data described by @Brantingham:1976aa. For example, Panel A of Figure \@ref(fig:scales) shows the data in its rawest form, but arguably conveys less information that the other panels that show data in aggregate.
+
+
+## Handling temporal ordering and autocorrelation
+
+One way in which time-series data are different from other data is that each data point has an inherent serial order relative to other data points. So whereas (for example) survey respondents are typically independent of one another, repeated measures of a quantity at different time points are not. This has implications for various research methods. For example, it is increasingly common to assess the validity of statistical models by dividing the available data at random into a sample used to fit (or train) the model and a separate sample used to test it [@James:2013aa]. For time-series data, this approach must be modified to account for the temporal ordering of the data [@Hyndman:2019aa].
+
+A particular consequence of ordering of temporal data is temporal (or serial) autocorrelation: observations of data taken close together (e.g. the count of crime last week and the count this week) are usually more similar to one another than observations taken further apart (e.g. the count of crime last week compared to the count six months ago). This can be seen in Panel A of Figure \@ref(fig:autocorrelation), where high weekly counts of motor vehicle theft are more likely to be followed by other high counts, and low counts more likely to be followed by other low counts.
+
+```{r autocorrelation, include=TRUE, fig.cap="Number of motor vehicle thefts reported in Washington, DC, 2016, by week"}
+ac_data <- data %>% 
+  filter(offense == "MOTOR VEHICLE THEFT") %>% 
+  mutate(week = yearweek(from_date)) %>% 
+  filter(year(week) == 2016) %>% 
+  count(week) %>% 
+  mutate(mean_n = mean(n))
+
+ac_test <- Box.test(ac_data$n, type = "Ljung-Box")
+
+ac_plot <- ggplot(ac_data) +
+  geom_ribbon(aes(week, ymin = mean_n, ymax = n), fill = "grey85") +
+  geom_line(aes(week, mean_n), colour = chart_elements$average_line_colour, 
+            linetype = chart_elements$average_line_linetype) +
+  geom_line(aes(week, n)) +
+  annotate(
+    "curve", 
+    x = ymd("2016-05-15"), 
+    y = ac_data$mean_n[1] - 0.5, 
+    xend = ymd("2016-05-30"), 
+    yend = ac_data$mean_n[1] * 0.8,
+    arrow = chart_elements$label_arrow,
+    colour = chart_elements$label_line_colour, 
+    curvature = chart_elements$label_line_curvature
+  ) +
+  annotate(
+    "label",
+    x = ymd("2016-05-30"),
+    y = ac_data$mean_n[1] * 0.8,
+    label = str_wrap(str_glue("mean {scales::comma(ac_data$mean_n[1])} ",
+                              "crimes per week"), 15),
+    colour = chart_elements$label_text_colour,
+    hjust = 0,
+    vjust = 1,
+    label.size = NA,
+    lineheight = chart_elements$label_text_lineheight,
+    size = chart_elements$label_text_size
+  ) +
+  scale_x_date(date_breaks = "2 months", date_labels = "%b", 
+               expand = expansion(mult = c(0.01, 0.02))) +
+  scale_y_continuous(labels = scales::comma_format(), limits = c(0, NA),
+                     expand = expansion(mult = c(0, 0.01))) +
+  labs(x = NULL, y = "number of crimes") +
+  theme_ashby() +
+  theme(
+    axis.title.y = element_text(hjust = 0),
+    panel.grid = element_blank()
+  )
+
+
+# the following code using parts of View(forecast:::autoplot.acf)
+acf_test <- acf(ac_data$n, plot = FALSE)
+acf_test_ci <- qnorm((1 + 0.95)/2)/sqrt(acf_test$n.used)
+acf_plot <- acf_test %>% 
+  pluck("acf") %>% 
+  as.data.frame() %>% 
+  as_tibble() %>% 
+  mutate(lag = row_number() - 1) %>% 
+  select(lag, acf = V1) %>% 
+  ggplot() +
+  geom_hline(yintercept = 0, colour = "grey50") +
+  geom_segment(aes(lag, acf, xend = lag, yend = 0)) +
+  geom_hline(
+    yintercept = c(-acf_test_ci, acf_test_ci),
+    colour = chart_elements$average_line_colour,
+    linetype = chart_elements$average_line_linetype
+  ) +
+  annotate(
+    "curve", 
+    x = 8.5, 
+    y = acf_test_ci, 
+    xend = 9.5, 
+    yend = acf_test_ci * 1.6,
+    arrow = chart_elements$label_arrow,
+    colour = chart_elements$label_line_colour, 
+    curvature = chart_elements$label_line_curvature * -1
+  ) +
+  annotate(
+    "label",
+    x = 9.5,
+    y = acf_test_ci * 1.6,
+    label = str_wrap("95% confidence interval", 15),
+    colour = chart_elements$label_text_colour,
+    hjust = 0,
+    label.size = NA,
+    lineheight = chart_elements$label_text_lineheight,
+    size = chart_elements$label_text_size
+  ) +
+  scale_x_continuous(n.breaks = 10) +
+  scale_y_continuous(n.breaks = 7) +
+  scale_fill_manual(
+    values = c("95" = "grey85", "99" = "grey95"),
+    labels = c("95" = "95%", "99" = "99%")
+  ) +
+  labs(
+    title = NULL, 
+    x = "lag", 
+    y = "autocorrelation function (ACF)",
+    fill = "confidence interval"
+  ) +
+  theme_ashby() +
+  theme(
+    axis.title.y = element_text(hjust = 0),
+    panel.grid.minor.y = element_blank()
+  )
+
+plot_autocorrelation <- plot_grid(ac_plot, acf_plot, align = "h", ncol = 2, 
+                                  labels = c("A", "B"), 
+                                  label_fontface = "plain")
+
+ggsave("figure_14-4.eps", plot_autocorrelation, width = 159, height = 159 * 0.5, 
+       units = "mm")
+
+knitr::include_graphics("figure_14-4.eps")
+```
+
+Temporal autocorrelation is a challenge because many statistical techniques assume each observation to be independent and may produce misleading results if that assumption is violated [@Tompson:2018aa]. For example, the results of $t$-tests and linear regression models are likely to be inaccurate [@De-Boef:2004aa]. Autocorrelation can be identified using several statistical tests. For example, a Ljung-Box test [@Ljung:1978aa] shows that there is significant autocorrelation in the weekly counts of motor vehicle thefts shown in Panel A of Figure \@ref(fig:autocorrelation) ($Q = `r scales::number(ac_test$statistic, accuracy = 0.1)`$, $`r scales::pvalue(ac_test$p.value, add_p = TRUE)`$). Temporal autocorrelation can also be analyzed graphically using an autocorrelation function (ACF) plot, also called a correlogram [@Box:1970aa]. In Panel B of Figure \@ref(fig:autocorrelation), for example, there is significant autocorrelation present (i.e. ACF values outside the 95% confidence interval) for the first several lags.
+
+Autocorrelation can be handled by using statistical methods that are appropriate for temporal data. The autoregressive integrated moving average (ARIMA) family of models is widely implemented in statistical software and commonly used in studying temporal patterns of crime [for recent examples, see @Ashby:2020ab; @Calvert:2020aa; @Yim:2020aa]. These models can handle many common features of temporal data, including seasonal variation. An ARIMA model will be used in the example section of this chapter, but for an accessible introduction to ARIMA models in criminology, see @Dugan:2010aa. For a more-formal explanation see Chapter 4 of @Box:2016aa.
+
+
+
+# Incorporating time into spatial analysis
+
+```{r districts, include=TRUE, fig.cap="Relative frequency of assaults with dangerous weapons by hour of the wek in the First and Sixth Police Districts of Washington, DC, 2016"}
+nbhd_counts <- data %>% 
+  filter(
+    district %in% c(1, 6),
+    offense == "ASSAULT W/DANGEROUS WEAPON"
+  ) %>% 
+  mutate(
+    district = scales::ordinal(district),
+    weekday = wday(from_date, label = FALSE, week_start = 1),
+    # next line from https://stackoverflow.com/a/26129060/8222654
+    date = as.Date("1-1-2000","%u-%W-%Y") + days(weekday - 1),
+    date_hour = parse_date_time(paste(date, hour(from_time)), "Ymd H")
+  )
+
+# add chart labels
+nbhd_labels <- tribble(
+	~x, ~y, ~xend, ~yend, ~label, ~hjust, ~vjust, ~curve,
+	as_datetime(as.Date("1-1-2000","%u-%W-%Y")) + days(5), 0.00000375, as.Date("1-1-2000","%u-%W-%Y") + days(4) + hours(6), 0.00000375, 
+	  str_wrap("First District (downtown)", 40), "right", "center", "right",
+	as_datetime(as.Date("1-1-2000","%u-%W-%Y")) + days(4) - hours(3), 0.0000027, as.Date("1-1-2000","%u-%W-%Y") + days(3) + hours(3), 0.000003, 
+	  str_wrap("Seventh District (residential)", 40), "right", "center", "right"
+)
+
+plot_districts <- ggplot() +
+  geom_density(
+    aes(date_hour, colour = district, fill = district),
+    data = filter(nbhd_counts, district == "1st"), 
+    adjust = 0.2
+  ) +
+  ggpattern::geom_density_pattern(
+    aes(date_hour, pattern_colour = district, pattern_fill = district),
+    data = filter(nbhd_counts, district == "6th"), 
+    adjust = 0.2, 
+    colour = "grey70",
+    pattern = "stripe", 
+    pattern_angle = 45, 
+    pattern_density = 0.05,
+    pattern_spacing = 0.01
+  ) +
+	# add explanatory labels
+	geom_curve(aes(x = x, y = y, xend = xend, yend = yend),
+						 data = filter(nbhd_labels, curve == "right"), inherit.aes = FALSE, 
+						 curvature = chart_elements$label_line_curvature, 
+						 colour = chart_elements$label_line_colour, 
+						 arrow = chart_elements$label_arrow, show.legend = FALSE) +
+	geom_segment(aes(x = x, y = y, xend = xend, yend = yend),
+						 data = filter(nbhd_labels, curve == "straight"), 
+						 inherit.aes = FALSE, colour = chart_elements$label_line_colour, 
+						 arrow = chart_elements$label_arrow, show.legend = FALSE) +
+	geom_curve(aes(x = x, y = y, xend = xend, yend = yend),
+						 data = filter(nbhd_labels, curve == "left"), inherit.aes = FALSE, 
+						 curvature = chart_elements$label_line_curvature * -1, 
+						 colour = chart_elements$label_line_colour, 
+						 arrow = chart_elements$label_arrow, show.legend = FALSE) +
+	geom_label(aes(x = xend, y = yend, label = label, hjust = hjust, 
+								 vjust = vjust),
+						data = nbhd_labels, inherit.aes = FALSE, 
+						colour = chart_elements$label_text_colour,
+						fill = chart_elements$label_text_fill, 
+						size = chart_elements$label_text_size, 
+						lineheight = chart_elements$label_text_lineheight,
+						label.size = NA, show.legend = FALSE) +
+	# end of explanatory labels
+  scale_x_datetime(date_breaks = "1 day", date_labels = "%H:%M\n%a", 
+                   expand = expansion(mult = c(0.01, 0.02))) +
+  scale_y_continuous(limits = c(0, NA), labels = scales::comma_format(),
+                     expand = expansion(mult = c(0, 0))) +
+  scale_fill_manual(
+    values = c("1st" = "grey90", "6th" = "grey75"),
+    aesthetics = c("colour", "fill", "pattern_colour", "pattern_fill")
+  ) +
+  labs(x = NULL, y = "density of crimes") +
+  theme_ashby() +
+  theme(
+    axis.line.x = element_line(colour = "grey92"),
+    axis.text.y = element_blank(),
+    legend.position = "none",
+    panel.grid.major.x = element_line(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.x = element_line(linetype = "21"),
+    panel.grid.minor.y = element_blank()
+  )
+
+ggsave("figure_14-5.eps", plot_districts, width = 159, height = 159 * 0.5, 
+       units = "mm")
+
+knitr::include_graphics("figure_14-5.eps")
+```
+
+
+Time is often relevant to spatial analysis because spatial patterns of crime frequently vary over time and temporal patterns often differ between places. Figure \@ref(fig:districts) shows the relative frequency throughout the week of assaults with a dangerous weapon in the areas covered by two districts of the Metropolitan Police Department of the District of Columbia (MPDC). The First District includes Capitol Hill, the eastern half of the National Mall and the Southwest Federal Center cluster of government office buildings, as well as some nearby residential areas. The Seventh District, by contrast, is almost entirely residential except for a large military base, which is not policed by MPDC. Figure \@ref(fig:districts) shows there are some similarities between the weekly patterns of serious assaults in both districts, but there are also notable differences. Dangerous-weapon assaults in the First District are particularly clustered on Friday and Saturday evenings, whereas in the Seventh District such offenses peak the in late evening on every night of the week, with some additional peaks during afternoon hours.
+
+Variations in temporal patterns can also be seen at smaller geographies. Figure \@ref(fig:hotspots) shows hotspots of assaults with dangerous weapons within a radius of two kilometers of the White House at different times of day. Hotspots in this case have been defined by counting the number of assaults in each 500-meter-wide cell in a hexagonal grid, then calculating the Getis–Ord $G_i^*$ statistic [@Getis:1992hw] for each cell. $Z$ scores of greater than $3.09$ (equivalent to $p = 0.001$) are treated as denoting significant hotspots. While some hotspots are persistent across all times of day, others exist only at certain times. The area around Farragut Square (marked A on Figure \@ref(fig:hotspots)) is a significant hotspot only during the daytime, which is unsurprising since the area hosts many large businesses that generate heavy daytime foot traffic. The Penn Quarter/Chinatown neighborhood (marked B on Figure \@ref(fig:hotspots)), which hosts many restaurants and entertainment venues, is a hotspot for serious assaults both in the daytime and during the evening. Meanwhile, the area around Dupont Circle (marked C on Figure \@ref(fig:hotspots)) is a hotspot only during overnight hours.
+
+
+```{r prepare hotspots}
+# see https://rpubs.com/quarcs-lab/spatial-autocorrelation for help
+
+# create grid
+district1_grid <- districts %>% 
+  # filter(DISTRICT == 1) %>% 
+  st_make_grid(cellsize = 500, square = FALSE) %>% 
+  st_as_sf() %>% 
+  mutate(cell_num = row_number())
+
+# create notable features
+map_features <- tribble(
+  ~name, ~x, ~y,
+  # "Capitol Building", -77.0091, 38.8898,
+  "White House", -77.0365, 38.8977
+) %>% 
+  st_as_sf(crs = 4326, coords = c("x", "y")) %>% 
+  st_transform(102685)
+
+# create hotspot labels
+map_labels <- tribble(
+  ~name, ~x, ~y, ~time_group,
+  "A", -77.0395, 38.9001, "daytime (07:00 to 17:59)",
+  "B", -77.0281, 38.8967, "daytime (07:00 to 17:59)",
+  "B", -77.0281, 38.8967, "evening (18:00 to 00:59)",
+  "C", -77.0439, 38.9056, "overnight (01:00 to 06:59)"
+) %>% 
+  st_as_sf(crs = 4326, coords = c("x", "y")) %>% 
+  st_transform(102685)
+
+# set bbox for map
+map_boundary <- map_features %>% 
+  filter(name == "White House") %>% 
+  st_buffer(1500 * 3.3) %>%  # converts feet to metres
+  st_bbox()
+
+# get main streets
+map_streets <- map_features %>% 
+  st_buffer(4000 * 3.3) %>%  # converts feet to metres
+  st_transform(4326) %>% 
+  st_bbox() %>% 
+  osmdata::opq() %>% 
+  osmdata::add_osm_feature(key = "highway") %>% 
+  osmdata::osmdata_sf() %>% 
+  pluck("osm_lines") %>% 
+  st_transform(102685) %>% 
+  filter(highway %in% c(
+    "motorway", "motorway_link", "trunk", "trunk_link", "primary", 
+    "primary_link", "secondary", "secondary_link", "tertiary", "teriary_link"
+  ))
+
+# get surface water
+map_water <- map_features %>% 
+  st_buffer(4000 * 3.3) %>%  # converts feet to metres
+  st_transform(4326) %>% 
+  st_bbox() %>% 
+  osmdata::opq() %>% 
+  osmdata::add_osm_feature(key = "natural", value = "water") %>% 
+  osmdata::osmdata_sf()
+map_water <- rbind(
+  select(map_water$osm_polygons, osm_id, name, water, geometry), 
+  select(map_water$osm_multipolygons, osm_id, name, water, geometry)
+) %>%
+  st_transform(102685)
+
+# create weights matrix
+cell_wts <- district1_grid %>% 
+  # extract centroid coordinates
+  st_geometry() %>% 
+  st_centroid() %>% 
+  # create matrix of neighbour relationships
+  spdep::dnearneigh(0, 850) %>% 
+  # include each cell as one of its own neighbours
+  spdep::include.self() %>% 
+  # convert the relationships to weights (binary in this case)
+  spdep::nb2listw(style = "B")
+
+# prepare data
+hotspot_data <- data %>% 
+  filter(offense %in% c("ROBBERY")) %>% 
+  mutate(time_group = case_when(
+    from_time >= hm("01:00") & from_time < hm("07:00") ~ 
+      "overnight (01:00 to 06:59)",
+    from_time >= hm("07:00") & from_time < hm("18:00") ~ 
+      "daytime (07:00 to 17:59)",
+    (from_time >= hm("18:00") & from_time <= hm("23:59")) | 
+      (from_time >= hm("00:00") & from_time < hm("01:00")) ~ 
+      "evening (18:00 to 00:59)",
+    TRUE ~ NA_character_
+  )) %>% 
+  select(from_time, time_group, xcoord, ycoord) %>% 
+  nest(data = c(from_time, xcoord, ycoord)) %>% 
+  mutate(
+    counts = map(data, function (x) {
+      x %>% 
+        # convert tibble to an SF object
+        st_as_sf(crs = 102685, coords = c("xcoord", "ycoord")) %>% 
+        # count crimes in each grid cell
+        st_join(district1_grid, join = st_within) %>% 
+        as_tibble() %>% 
+        count(cell_num) %>% 
+        right_join(district1_grid, by = "cell_num") %>% 
+        replace_na(list(n = 0)) %>% 
+        select(cell_num, crimes = n, geometry = x) %>% 
+        # calculate GI*
+        mutate(gistar = as.numeric(spdep::localG(crimes, cell_wts)))
+    })
+  ) %>% 
+  select(-data) %>% 
+  unnest(cols = "counts") %>% 
+  st_as_sf(crs = 102685) %>% 
+  # filter out cells with non-significant crime counts
+  filter(gistar > 3.0903)
+```
+
+
+```{r hotspots, include=TRUE, fig.cap="Hotspots of assault with a dangerous weapon at different times of day in Washington, DC, 2016"}
+# plot map
+plot_hotspots <- ggplot() + 
+  geom_sf(data = map_water, colour = NA, fill = "grey92") +
+  geom_sf(data = map_streets, colour = "grey88") +
+  geom_sf(
+    aes(fill = "hotspot", geometry = geometry),
+    data = ungroup(mutate(group_by(hotspot_data, time_group), 
+                  geometry = st_union(geometry))),
+    colour = NA
+  ) +
+  geom_sf(
+    aes(colour = "hotspot", geometry = geometry),
+    data = ungroup(mutate(group_by(hotspot_data, time_group),
+                  geometry = st_union(geometry))),
+    fill = NA
+  ) +
+  geom_sf(
+    aes(shape = name),
+    data = map_features,
+    colour = "black",
+    fill = "black",
+    size = 2
+  ) +
+  geom_sf_text(
+    aes(label = name),
+    data = map_labels,
+    colour = chart_elements$label_text_colour,
+    fontface = "bold",
+    lineheight = chart_elements$label_text_lineheight,
+    size = chart_elements$label_text_size * 1.2,
+    hjust = 1,
+    vjust = 1
+  ) +
+  ggspatial::annotation_north_arrow(
+    data = tibble(time_group = "overnight (01:00 to 06:59)"),
+    location = "br",
+    height = unit(1, "lines"), 
+    width = unit(1, "lines"),
+    style = ggspatial::north_arrow_fancy_orienteering(
+      line_col = "grey50", fill = "grey50", text_size = 0)
+  ) +
+  ggspatial::annotation_scale(
+    data = tibble(time_group = "overnight (01:00 to 06:59)"),
+    location = "bl",
+    height = unit(0.33, "lines"), 
+    line_col = "grey40",
+    text_col = "grey40",
+    style = "ticks", 
+    unit_category = "metric", 
+    width_hint = 0.2
+  ) +
+  scale_colour_manual(
+    name = "hotspot", 
+    values = c("hotspot" = "grey25"),
+    labels = c("hotspot" = "crime hotspot")
+  ) +
+  scale_fill_manual(
+    name = "hotspot", 
+    values = c("hotspot" = "grey75"),
+    labels = c("hotspot" = "crime hotspot")
+  ) +
+  scale_shape_manual(values = c("Capitol Building" = 23, "White House" = 8)) +
+  facet_wrap(vars(time_group)) +
+  lims(
+    x = c(map_boundary$xmin, map_boundary$xmax),
+    y = c(map_boundary$ymin - (750 * 3.3), map_boundary$ymax)
+  ) +
+  labs(
+    caption = "Data from OpenStreetMap: www.openstreetmap.org/copyright"
+  ) +
+  theme_ashby() +
+  theme(
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    axis.title = element_blank(),
+    legend.box.background = element_rect(colour = NA, fill = "white"),
+    legend.box.margin = margin(0, 4, 4, 4, "pt"),
+    legend.justification = c(0, 0),
+    legend.margin = margin(0, 0, 0, 0, "pt"),
+    legend.position = c(0.01, 0.01),
+    legend.spacing = unit(0, "lines"),
+    legend.title = element_blank(),
+    panel.border = element_rect(colour = "grey70", fill = NA),
+    panel.grid = element_blank()
+  )
+
+ggsave("figure_14-6.eps", plot_hotspots, width = 159, height = 159 * 0.5, 
+       units = "mm")
+
+knitr::include_graphics("figure_14-6.eps")
+```
+
+Ignoring the temporal dimension of crime and place risks committing an ecological fallacy [@Jargowsky:2005aa]. This can be avoided by giving careful consideration to how time might be relevant to the phenomenon under study, using an appropriate theoretical perspective on which to base predictions about the role of time in a given situation. The routine activities approach can be used to identify how the aggregate activity patterns of different actors in a crime event might influence the spatio-temporal distribution of crime [@Eck:2015aa]. For example, researchers studying crime in a city park may benefit from disaggregating their analysis into crimes during daylight and those at night, or crimes on weekdays compared to those at weekends. The multi-faceted nature of temporal variation in crime (apparent in Figure \@ref(fig:scales)) means that it is often fruitful to explore empirically multiple ways of 'slicing' data in time to better understand how time influences spatial crime patterns. Comparing the results of patterns identified using different temporal units also allows understanding of the extent to which those results are affected by the modifiable temporal unit problem [@Cheng:2014aa].
+
+
+# Identifying change over time
+
+A common research question in the study of crime and place is whether crime or some other phenomenon changed as a result of a deliberate intervention or organic change in circumstances. It is common, for example, for researchers to study the impact of a place-based intervention by police, such as extra patrols or installation of surveillance cameras. It is therefore important to have reliable methods for identifying changes in crime at places.
+
+Many studies have used simple before-and-after research designs to understand changes in crime or other phenomena after an intervention, for example using a $t$-test to compare pre- and post-intervention values of some outcome measure. @Earl:2017aa used $t$-tests to measure change in offending before and after participants were referred to a mental-health diversion scheme. @Sousa:2016aa used the same approach to test whether the introduction of CCTV cameras was associated with a change in police calls for service.
+
+```{r beforeafter, include=TRUE, fig.cap="Change in the frequency of crime before and after a hypothetical intervention"}
+
+change_data <- seq.Date(ymd("2015-01-01"), ymd("2019-12-31"), 
+                        by = "4 weeks") %>% 
+  enframe(name = NULL, value = "period_date") %>% 
+  mutate(
+    # extract year
+    year = year(period_date),
+    # create frequencies based on a starting point of 100 crimes per period,
+    # an upward trend of 1 crime per period and some random variation
+    n = 100 + row_number() + rnorm(n(), sd = 5),
+    # create effect whereby crime decreases by 3.5 times the number of rows
+    # remaining in the dataset, meaning there is a large initial effect 
+    # beginning one month before the intervention and then decaying to nothing
+    # by the end of the year
+    n = ifelse(
+      period_date >= ymd("2018-11-29"), 
+      n - 3.5 * (n() - row_number()), 
+      n
+    ),
+    period = case_when(
+      between(period_date, ymd("2018-12-27") - weeks(51), ymd("2018-12-27")) ~ 
+        "pre",
+      between(period_date, ymd("2018-12-27"), ymd("2018-12-27") + weeks(52)) ~ 
+        "post",
+      TRUE ~ NA_character_
+    )
+  ) %>% 
+  group_by(period) %>% 
+  mutate(
+    # calculate annual mean number of crimes, setting mean to NA for all but the 
+    # last two years
+    annual_mean = ifelse(period %in% c("pre", "post"), mean(n), NA)
+  ) %>% 
+  ungroup()
+
+change_test <- t.test(
+  change_data$n[change_data$period == "pre"], 
+  change_data$n[change_data$period == "post"]
+)
+
+# add chart labels
+change_labels <- tribble(
+	~x, ~y, ~xend, ~yend, ~label, ~hjust, ~vjust, ~curve,
+	ymd("2018-02-01"), change_data$annual_mean[change_data$year == 2018][1] + 1, ymd("2017-10-01"), max(change_data$n[change_data$year %in% 2015:2017]) + 15, 
+	  str_wrap(str_glue("mean of {scales::comma(change_data$annual_mean[change_data$year == 2018][1])} crimes per four-week period in the year before implementation began"), 40), "right", "center", "right",
+	ymd("2019-10-31"), change_data$annual_mean[change_data$year == 2019][1] - 1, ymd("2019-10-01"), min(change_data$n[change_data$year %in% 2018:2019]) - 10, 
+	  str_wrap(str_glue("mean of {scales::comma(change_data$annual_mean[change_data$year == 2019][1])} crimes per four-week period in the year after implementation began"), 30), "right", "top", "left",
+	ymd("2018-12-20"), 30, ymd("2018-06-20"), 30, "intervention introduced", "right", "bottom", "left"
+)
+
+plot_beforeafter <- ggplot(change_data, aes(period_date, n)) +
+  geom_step(
+    aes(period_date, annual_mean), 
+    na.rm = TRUE,
+    colour = chart_elements$average_line_colour, 
+    linetype = "62",
+    direction = "vh"
+  ) +
+  geom_vline(xintercept = ymd("2018-12-27"), colour = "grey50") +
+  geom_smooth(
+    aes(linetype = "line"),
+    data = filter(change_data, period_date < ymd("2018-11-29")),
+    method = "lm",
+    formula = "y ~ x",
+    se = FALSE,
+    fullrange = TRUE,
+    colour = chart_elements$average_line_colour
+  ) +
+  geom_point(size = 0.75, na.rm = TRUE) +
+	# add explanatory labels
+	geom_curve(aes(x = x, y = y, xend = xend, yend = yend),
+						 data = filter(change_labels, curve == "right"), inherit.aes = FALSE, 
+						 curvature = chart_elements$label_line_curvature, 
+						 colour = chart_elements$label_line_colour, 
+						 arrow = chart_elements$label_arrow, show.legend = FALSE) +
+	geom_segment(aes(x = x, y = y, xend = xend, yend = yend),
+						 data = filter(change_labels, curve == "straight"), 
+						 inherit.aes = FALSE, colour = chart_elements$label_line_colour, 
+						 arrow = chart_elements$label_arrow, show.legend = FALSE) +
+	geom_curve(aes(x = x, y = y, xend = xend, yend = yend),
+						 data = filter(change_labels, curve == "left"), inherit.aes = FALSE, 
+						 curvature = chart_elements$label_line_curvature * -1, 
+						 colour = chart_elements$label_line_colour, 
+						 arrow = chart_elements$label_arrow, show.legend = FALSE) +
+	geom_label(aes(x = xend, y = yend, label = label, hjust = hjust, 
+								 vjust = vjust),
+						data = change_labels, inherit.aes = FALSE, 
+						colour = chart_elements$label_text_colour,
+						fill = chart_elements$label_text_fill, 
+						size = chart_elements$label_text_size, 
+						lineheight = chart_elements$label_text_lineheight,
+						label.size = NA, show.legend = FALSE) +
+	# end of explanatory labels
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y", 
+               expand = expansion(mult = c(0.01, 0.03))) +
+  scale_y_continuous(
+    limits = c(0, NA), 
+    labels = scales::comma_format(),
+    expand = expansion(mult = c(0, 0.01))
+  ) +
+  scale_linetype_manual(
+    values = c("line" = chart_elements$average_line_linetype),
+    labels = c("line" = "pre-intervention linear trend")
+  ) +
+  labs(x = NULL, y = "number of crimes", linetype = NULL) +
+  theme_ashby() +
+  theme(
+    legend.key.width = unit(1.5, "cm"),
+    legend.justification = c(0, 0),
+    legend.position = c(0.01, 0.01)
+  )
+
+ggsave("figure_14-7.eps", plot_beforeafter, width = 159, height = 159 * 0.5, 
+       units = "mm")
+
+knitr::include_graphics("figure_14-7.eps")
+```
+
+This simple before-and-after approach may be unwise for several reasons. Figure \@ref(fig:beforeafter) shows the four-weekly frequency of a hypothetical crime over five years (using synthetic data), with an intervention introduced at the beginning of the fifth year. The figure shows there is a general upward trend in crime, a substantial drop in crime beginning the four-week period *before* the intervention is introduced [possibly due to anticipatory benefits – see @Smith:2002aa], and an erosion of that drop over subsequent periods so that by the end of the fifth year crime has returned to the level expected based on the pre-intervention trend.
+
+A simple $t$-test comparing the number of crimes in the year before and after the intervention occurred would suggest no difference between the frequency of crime before and after the intervention ($t(`r scales::number(change_test$parameter, accuracy = 0.1)`) = `r scales::number(change_test$statistic, accuracy = 0.01)`$, $`r scales::pvalue(change_test$p.value, add_p = TRUE)`$). However, this test ignores the crime trend (which also invalidates the assumption that the two samples in the $t$-test are independent) and cannot distinguish between the apparent initial drop in crime and the subsequent increase back to pre-intervention levels. If the changes apparent in Figure \@ref(fig:beforeafter) are due to the intervention, an approach based on $t$-tests or similar methods could be misleading.
+
+
+
+
+# Example: testing changes in crime associated with community policing
+
+In May 2015, the New York City Police Department (NYPD) introduced an initiative that rearranged officer assignments to create new roles -- known as neighborhood coordination officers (NCOs) -- who would focus on working with local communities to reduce crime [@Bratton:2015aa]. The initiative began in four police precincts (the 33rd, 34th, 100th and 101st) in May 2015, before being expanded to other neighborhoods over time [@NYC-Office-of-the-Mayor:2016aa]. We can use methods appropriate for temporal data to compare precincts to identify whether any changes in crime were associated with this initiative.
+
+We will use data from the Open Crime Database, which contains crime data for large US cities over several years [@Ashby:2019aa]. For the purpose of this example we will only analyze assaults, but a more-detailed analysis could also consider other crime types. We will do the analysis in R (the following code was run in R version `r R.version$major`.`r R.version$minor`), for which the `crimedata` package provides access to the Crime Open Database. We will use the `tidyverse` suite of packages [@Wickham:2019aa] for data processing, the `sf` package [@Pebesma:2018aa] for spatial operations and the `tsibble` package [@Wang:2020aa] for handling time-series data. For an introduction to the pipe operator -- `%>%` -- see @Bache:2014aa.
+
+First we load the necessary packages:
+
+```{r echo=TRUE, include=TRUE, size = "footnotesize"}
+# load packages
+library("crimedata") # major city crime data
+library("sf")        # spatial processing
+library("tsibble")   # time-series processing
+library("tidyverse") # data processing
+```
+
+and data:
+
+```{r echo=TRUE, include=TRUE, size = "footnotesize"}
+# load data from the Crime Open Database
+years_to_analyze <- 2010:2016
+ny_data <- get_crime_data(years = years_to_analyze, cities = "New York", 
+                          type = "core", output = "sf")
+
+# download NYPD precinct boundaries
+precincts <- str_glue("https://data.cityofnewyork.us/api/geospatial/", 
+                      "78dh-3ptz?method=export&format=GeoJSON") %>% 
+  read_sf() %>% 
+  st_transform(2263)
+```
+
+Second, we identify which precinct each crime occurred in and group precincts into those included in the pilot phase and those that only received NCOs in October 2016. For this example the comparison precincts were chosen manually, but this could have been done using various methods [@Steventon:2015aa], including a synthetic control approach [@Saunders:2014aa].
+
+```{r echo=TRUE, include=TRUE, size = "footnotesize"}
+ny_violence_precincts <- ny_data %>% 
+  # filter out all crimes except assaults
+  filter(offense_type %in% 
+           c("murder and nonnegligent manslaughter", "aggravated assault")) %>% 
+  # convert coordinates to local coordinate system
+  st_transform(2263) %>% 
+  st_join(precincts) %>% 
+  mutate(group = factor(case_when(
+    precinct %in% c("33", "34", "100", "101") ~ "NCO",
+    precinct %in% c("26", "30", "60", "61") ~ "comparison",
+    TRUE ~ NA_character_
+  ), levels = c("comparison", "NCO")))
+```
+
+We can now count the number of crimes occurring each week in the group of precincts that piloted the initiative and the comparison precincts.
+
+```{r echo=TRUE, include=TRUE, size = "footnotesize"}
+violence_counts <- ny_violence_precincts %>% 
+  # remove the spatial data, since we no longer need it and it slows processing
+  st_set_geometry(NULL) %>% 
+  # extract week of the year from offense date
+  mutate(week = yearweek(date_single)) %>% 
+  # filter out crimes that occurred before the first full week of the first year
+  # or which are not in one of the NCO or comparison precincts
+  filter(year(week) %in% years_to_analyze, !is.na(group)) %>% 
+  # count number of offenses in each precinct group each week
+  count(group, week) %>% 
+  # if no serious assaults occurred in a week in a precinct group, that week 
+  # will be missing from the data, so we convert the counts to a time-series 
+  # object that can detect missing rows and insert zero counts
+  as_tsibble(key = group, index = week) %>% 
+  fill_gaps(n = 0) %>% 
+  # then convert the data back to a normal data frame
+  as_tibble() %>% 
+  # finally, calculate whether each week occurred before or after the start date
+  # of the community policing initiative
+  mutate(after = week >= ymd("2015-05-18"))
+```
+
+To compare serious violence in the precincts that piloted the initiative to the comparison precincts, we will use the difference-in-differences (DiD) approach [@Angrist:2009aa] to compare the difference between the NCO and comparison precincts before the initiative to the difference after the initiative began. Using a comparison group allows us to deal with the issue of trends in time-series data, as long as the long-term trend is similar in both the intervention and comparison groups.
+
+There are several different statistical models that we can use to implement the DiD approach. We could, for example, use generalized least squares (GLS) regression with correlated errors [@Faraway:2014aa]. Since the weekly counts of crime are approximately normally distributed, the simplest approach is to run a linear regression and then adjust the standard errors so that we can draw inferences from the results even though the serial autocorrelation in the data violates one of the model assumptions.
+
+The difference-in-differences approach uses the interaction between two terms in a regression model to estimate the means of four groups of weekly counts. For this example, we will not include any other terms in the model.
+
+```{r echo=TRUE, include=TRUE, size = "footnotesize"}
+vio_model <- lm(n ~ group * after, data = violence_counts)
+
+vio_model %>% 
+  # extract coefficients, p-values etc
+  broom::tidy() %>% 
+  # format columns
+  mutate_at(vars(estimate, std.error, statistic), scales::number) %>% 
+  mutate_at(vars(p.value), scales::pvalue) %>% 
+  knitr::kable(booktabs = TRUE, align = "lrrrr")
+```
+
+The interaction term produces estimates for the mean weekly crime counts for four groups of weeks:
+
+  * counts in the comparison group for weeks before the intervention began (the model intercept),
+  * counts in the NCO group for weeks before the intervention began (the `groupNCO` co-efficient),
+  * counts in the comparison group for weeks after the intervention began (the `afterTRUE` co-efficient), and
+  * counts in the NCO group for weeks after the intervention began (the `groupNCO:afterTRUE` interaction co-efficient).
+
+We can use the `NeweyWest()` function from the `sandwich` package [@Zeileis:2004aa] and the `coeftest()` function from the `lmtest` package to calculate standard errors and associated $p$-values adjusted for autocorrelation [@Zeileis:2002aa].
+
+```{r echo=TRUE, include=TRUE, size = "footnotesize"}
+lmtest::coeftest(vio_model, vcov = sandwich::NeweyWest(vio_model)) %>% 
+  broom::tidy() %>% 
+  mutate_at(vars(estimate, std.error, statistic), scales::number) %>% 
+  mutate_at(vars(p.value), scales::pvalue) %>% 
+  knitr::kable(booktabs = TRUE, align = "lrrrr")
+```
+
+This shows that there were about `r number_to_text(vio_model$coefficients["(Intercept)"])` offenses of serious violence per week across the four comparison precincts before the intervention began (the model intercept), with the mean number of pre-intervention offenses in the NCOs precincts (the `groupNCO` term) not being significantly different. After the intervention began, there was no significant difference in the frequency of serious assaults in the comparison precincts (the `afterTRUE` term), but post-intervention offenses in the NCO precincts (the `groupNCO:afterTRUE` term) increased by about `r number_to_text(round(vio_model$coefficients["groupNCO:afterTRUE"]))` assaults per week. This is contrary to the objective of the initiative, which was to reduce crime.
+
+Obtaining a full answer to the question of whether the introduction of NCOs was associated with any change in the frequency of serious violence would need to consider any anticipation benefits, whether there was any change in effect over time (e.g. if NCOs took time to become effective) and whether there was any variation between pilot precincts. A more-detailed analysis should also consider how to choose the best comparison precincts. Nevertheless, this simple example illustrates some of the issues involved in handling temporal data when studying crime and place.
+
+
+# References
+
+\footnotesize
+
