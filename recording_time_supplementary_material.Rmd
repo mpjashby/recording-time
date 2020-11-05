@@ -1,0 +1,378 @@
+---
+title             : "Incorporating time into studying crime and place (supplementary material)"
+shorttitle        : "Incorporating time (supplementary material)"
+
+author: 
+  - name          : "Matthew P J Ashby"
+    affiliation   : "1"
+    corresponding : yes    # Define only one corresponding author
+    address       : "35 Tavistock Square, London WC1H 9EZ"
+    email         : "matthew.ashby@ucl.ac.uk"
+
+affiliation:
+  - id            : "1"
+    institution   : "Jill Dando Institute of Security and Crime Science, University College London"
+
+# keywords          : "keywords"
+wordcount         : "`scales::comma(wordcountaddin::word_count())`"
+
+bibliography      : "../bibliography.bib"
+
+floatsintext      : no
+figurelist        : no
+tablelist         : no
+footnotelist      : no
+linenumbers       : no
+mask              : no
+draft             : no
+
+documentclass     : "apa6"
+classoption       : "man"
+output            : papaja::apa6_word
+---
+
+
+
+```{r setup, include = FALSE}
+# load packages
+library("lubridate")
+library("papaja")
+library("tsibble")
+library("tidyverse")
+
+# suppress printing of code from code chunks
+knitr::opts_chunk$set(cache = TRUE, include = FALSE)
+# knitr::knit_theme$set("greyscale0")
+
+# load helpers
+source("../helpers.R")
+```
+```{r create functions, include = FALSE}
+ts_count <- function(data, var) {
+  as_tibble(fill_gaps(as_tsibble(count(data, {{var}}), index = {{var}})))
+}
+```
+
+
+
+# Identifying change over time
+
+A common research question in the study of crime and place is whether the frequency of crime or some other phenomenon has changed as a result of a deliberate intervention or organic change in circumstances. It is common, for example, for researchers to study the impact of a place-based intervention by police, such as extra patrols or the installation of surveillance cameras. It is therefore important to have reliable methods for identifying changes in crime at places.
+
+Many studies have used simple before-and-after research designs to understand changes in crime after an intervention, for example using a $t$-test to compare pre- and post-intervention values of some outcome measure. For example, @Earl:2017aa used $t$-tests to measure change in offending before and after participants were referred to a mental-health diversion scheme. @Sousa:2016aa used the same approach to test whether the introduction of CCTV cameras was associated with a change in police calls for service.
+
+(ref:beforeafter) Change in the frequency of crime before and after a hypothetical intervention
+
+```{r beforeafter, include=TRUE, fig.cap="(ref:beforeafter)"}
+
+change_data <- seq.Date(ymd("2015-01-01"), ymd("2019-12-31"), by = "months") %>% 
+  enframe(name = NULL, value = "month_date") %>% 
+  mutate(
+    # extract year
+    year = year(month_date),
+    # create frequencies based on a starting point of 100 crimes per month,
+    # an upward trend of 1 crime per month and some random variation
+    n = 100 + row_number() + rnorm(n(), sd = 5),
+    # reduce crime after the intervention began
+    # n = ifelse(year == last(year), n - 15, n),
+    # create effect decay of +1 crime per month after intervention began
+    n = ifelse(month_date >= ymd("2018-12-01"), n - 3.5 * (n() - row_number()), n)
+  ) %>% 
+  group_by(year) %>% 
+  mutate(
+    # calculate annual mean number of crimes, setting mean to NA for all but the 
+    # last two years
+    annual_mean = ifelse(year %in% 2018:2019, mean(n), NA)
+  ) %>% 
+  ungroup()
+
+change_test <- t.test(
+  change_data$n[change_data$year == 2018], 
+  change_data$n[change_data$year == 2019]
+)
+change_test_ef <- effsize::cohen.d(
+  change_data$n[change_data$year == 2018], 
+  change_data$n[change_data$year == 2019],
+  noncentral = TRUE
+)
+
+# add chart labels
+change_labels <- tribble(
+	~x, ~y, ~xend, ~yend, ~label, ~hjust, ~vjust, ~curve,
+	ymd("2018-01-01"), change_data$annual_mean[change_data$year == 2018][1] + 1, ymd("2017-09-01"), max(change_data$n[change_data$year %in% 2015:2017]) + 10, 
+	  str_wrap(str_glue("mean of {scales::comma(change_data$annual_mean[change_data$year == 2018][1])} crimes per month in the year before implementation began"), 40), "right", "center", "right",
+	ymd("2019-10-31"), change_data$annual_mean[change_data$year == 2019][1] - 1, ymd("2019-10-01"), min(change_data$n[change_data$year %in% 2018:2019]) - 10, 
+	  str_wrap(str_glue("mean of {scales::comma(change_data$annual_mean[change_data$year == 2019][1])} crimes per month in the year after implementation began"), 25), "right", "top", "left",
+	ymd("2018-12-20"), 30, ymd("2018-06-20"), 30, "intervention introduced", "right", "bottom", "left"
+	# ymd("2019-11-30"), 163, ymd("2019-08-01"), 170, "pre-intervention linear trend", "right", "center", "right"
+)
+
+ggplot(change_data, aes(month_date, n)) +
+  geom_step(
+    aes(month_date, annual_mean), 
+    na.rm = TRUE,
+    colour = chart_elements$average_line_colour, 
+    linetype = "62"
+  ) +
+  geom_vline(xintercept = ymd("2019-01-01"), colour = "grey50") +
+  geom_smooth(
+    aes(linetype = "line"),
+    data = filter(change_data, year <= 2018),
+    method = "lm", 
+    formula = "y ~ x", 
+    se = FALSE, 
+    fullrange = TRUE,
+    colour = chart_elements$average_line_colour
+  ) +
+  # geom_line() +
+  geom_point(size = 0.75, na.rm = TRUE) +
+	# add explanatory labels
+	geom_curve(aes(x = x, y = y, xend = xend, yend = yend),
+						 data = filter(change_labels, curve == "right"), inherit.aes = FALSE, 
+						 curvature = chart_elements$label_line_curvature, 
+						 colour = chart_elements$label_line_colour, 
+						 arrow = chart_elements$label_arrow, show.legend = FALSE) +
+	geom_segment(aes(x = x, y = y, xend = xend, yend = yend),
+						 data = filter(change_labels, curve == "straight"), 
+						 inherit.aes = FALSE, colour = chart_elements$label_line_colour, 
+						 arrow = chart_elements$label_arrow, show.legend = FALSE) +
+	geom_curve(aes(x = x, y = y, xend = xend, yend = yend),
+						 data = filter(change_labels, curve == "left"), inherit.aes = FALSE, 
+						 curvature = chart_elements$label_line_curvature * -1, 
+						 colour = chart_elements$label_line_colour, 
+						 arrow = chart_elements$label_arrow, show.legend = FALSE) +
+	geom_label(aes(x = xend, y = yend, label = label, hjust = hjust, 
+								 vjust = vjust),
+						data = change_labels, inherit.aes = FALSE, 
+						colour = chart_elements$label_text_colour,
+						fill = chart_elements$label_text_fill, 
+						size = chart_elements$label_text_size, 
+						lineheight = chart_elements$label_text_lineheight,
+						label.size = NA, show.legend = FALSE) +
+	# end of explanatory labels
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y", 
+               expand = expansion(mult = c(0.01, 0.03))) +
+  scale_y_continuous(
+    limits = c(0, NA), 
+    labels = scales::comma_format(),
+    expand = expansion(mult = c(0, 0.01))
+  ) +
+  scale_linetype_manual(
+    values = c("line" = chart_elements$average_line_linetype),
+    labels = c("line" = "pre-intervention linear trend")
+  ) +
+  labs(x = NULL, y = "number of crimes", linetype = NULL) +
+  theme_ashby() +
+  theme(
+    legend.key.width = unit(1.5, "cm"),
+    legend.justification = c(0, 0),
+    legend.position = c(0.01, 0.01)
+  )
+
+ggsave("figure_14-s1.eps", width = 7, height = 7 * 0.6, units = "in")
+ggsave("figure_14-s1.pdf", width = 7, height = 7 * 0.6, units = "in")
+```
+
+This simple before-and-after approach may be unwise for several reasons. Figure \@ref(fig:beforeafter) shows the monthly frequency of a hypothetical crime over five years (using synthetic data), with an intervention introduced at the beginning of the fifth year. The figure shows there is a general upward trend in crime, a substantial drop in crime beginning the month *before* the intervention is introduced [possibly due to anticipatory benefits – see @Smith:2002aa], and an erosion of that drop over subsequent months so that by the end of the fifth year crime has returned to the level expected based on the pre-intervention trend.
+
+A simple $t$-test comparing the number of crimes in the year before and after the intervention occurred would suggest no difference between the frequency of crime before and after the intervention ($t(`r scales::number(change_test$parameter, accuracy = 0.1)`) = `r scales::number(change_test$statistic, accuracy = 0.01)`$, $`r scales::pvalue(change_test$p.value, add_p = TRUE)`$, $d = `r scales::number(change_test_ef$estimate, accuracy = 0.01)`$, 95% CI [`r scales::number(change_test_ef$conf.int[1], accuracy = 0.01)`, `r scales::number(change_test_ef$conf.int[2], accuracy = 0.01)`]). However, this test ignores the crime trend (which also invalidates the assumption that the two samples in the $t$-test are independent) and cannot distinguish between the apparent initial drop in crime and the subsequent increase back to pre-intervention levels. If the changes apparent in Figure \@ref(fig:beforeafter) are due to the intervention, an approach based on $t$-tests or similar methods could be misleading.
+
+
+
+# Example: testing changes in crime associated with community policing
+
+In May 2015, the New York City Police Department (NYPD) introduced an initiative that rearranged officer assignments to create new roles -- known as neighborhood coordination officers (NCOs) -- who would focus on working with local communities to reduce crime [@Bratton:2015aa]. The initiative began in four police precincts (33rd, 34th, 100th and 101st) in May 2015, before being expanded to other neighborhoods over time [@NYC-Office-of-the-Mayor:2016aa]. We can use time-series methods to compare precincts to identify whether any changes in crime were associated with this initiative.
+
+We will use data from the Open Crime Database, which contains crime data for large US cities over several years [@Ashby:2019aa]. For the purpose of this example we will only analyze assaults, but a more-detailed analysis could also consider other crime types. We will do the analysis in R (the following code was run in R version `r R.version$major`.`r R.version$minor`), for which the `crimedata` package provides access to the Crime Open Database. We will use the `tidyverse` suite of packages [@Wickham:2019aa] for data processing, the `sf` package [@Pebesma:2018aa] for spatial operations and the `tsibble` package [@Wang:2020aa] for handling time-series data. For an introduction to the pipe operator `%>%` see @Bache:2014aa.
+
+First we load the necessary packages:
+
+```{r echo=TRUE, include=TRUE}
+# load packages
+library("crimedata") # major city crime data
+library("lubridate") # date handling
+library("sf")        # spatial processing
+library("tsibble")   # time-series processing
+library("tidyverse") # data processing
+```
+
+and data:
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, include=TRUE}
+# load data from the Crime Open Database
+years_to_analyze <- 2010:2016
+# this next line may take a few minutes to run
+ny_data <- get_crime_data(
+  years = years_to_analyze, 
+  cities = "New York", 
+  type = "core", 
+  quiet = TRUE, 
+  output = "sf"
+)
+
+# download NYPD precinct boundaries
+precincts <- str_glue(
+  "https://data.cityofnewyork.us/api/geospatial/78dh-3ptz?", 
+  "method=export&format=GeoJSON"
+) %>% 
+  read_sf() %>% 
+  st_transform(2263)
+```
+
+Second, we identify which precinct each crime occurred in and group precincts into those included in the pilot phase and those that only received NCOs in October 2016. For this example, this comparison group has been chosen manually.
+
+```{r echo=TRUE, include=TRUE}
+ny_violence_precincts <- ny_data %>% 
+  # filter out all crimes except assaults
+  filter(offense_type %in% c("murder and nonnegligent manslaughter", 
+                             "aggravated assault")) %>% 
+  # convert coordinates to local coordinate system
+  st_transform(2263) %>% 
+  # join the information in the precincts dataset (in particular, 
+  # precinct number) to the crime data based on crime location
+  st_join(precincts) %>% 
+  mutate(group = case_when(
+    precinct %in% c("33", "34", "100", "101") ~ "initiative",
+    precinct %in% c("26", "30", "60", "61") ~ "comparison",
+    TRUE ~ NA_character_
+  ))
+```
+
+We can now count the number of crimes occurring each week in the group of precincts that piloted the initiative and the comparison precincts.
+
+```{r echo=TRUE, include=TRUE}
+violence_counts <- ny_violence_precincts %>% 
+  # remove the spatial data, since we no longer need it and it 
+  # slows processing
+  st_set_geometry(NULL) %>% 
+  # extract week of the year from offense date
+  mutate(week = yearweek(date_single)) %>% 
+  # filter out crimes that occurred before the first full week of
+  # the first year, as well as crimes in precincts that are not
+  # in either the initiative or comparison groups
+  filter(year(week) %in% years_to_analyze, !is.na(group)) %>% 
+  # count number of offenses in each precinct group each week
+  count(group, week) %>% 
+  # if no serious assaults occurred in a week in a precinct
+  # group, that week will be missing from the data, so we convert
+  # the counts to a time-series object that can detect missing
+  # rows and insert zero counts
+  as_tsibble(key = group, index = week) %>% 
+  fill_gaps(n = 0) %>% 
+  # then convert the data back to a normal data frame
+  as_tibble() %>% 
+  # finally, calculate whether each week occurred before or after
+  # the start date of the community policing initiative
+  mutate(initiative = week >= yearweek(ymd("2015-05-18")))
+```
+
+To compare serious violence in the precincts that piloted the initiative to the comparison precincts, we will use the difference-in-differences (DiD) approach [@Angrist:2009aa] to compare the difference between the initiative and comparison precincts before the initiative to the difference after the initiative began. Using a comparison group allows us to deal with the issue of trends in time-series data, as long as the long-term trend is similar in both the intervention and comparison groups.
+
+The DiD method requires that the trend in comparison precincts prior to the start of the initiative matches the trend in the initiative precincts -- divergent trends can produce misleading results. We can compare the trends by plotting them on a chart (Figure \@ref(fig:priortrends)), which shows the pre-initiative trend is very similar across the initiative and comparison precincts.
+
+(ref:priortrends) Linear trend in assaults in initiative and comparison precincts
+
+```{r priortrends, echo=TRUE, include=TRUE, fig.cap="(ref:priortrends)"}
+violence_counts %>% 
+  ggplot(aes(as_date(week), n)) + 
+  geom_vline(aes(xintercept = ymd("2015-05-18")), color = "grey50") +
+  geom_point(size = 0.75, color = "grey50", alpha = 0.5) + 
+  geom_smooth(
+    method = "lm", formula = "y ~ x", colour = "grey20",
+    data = filter(violence_counts, 
+                  as_date(week) < ymd("2015-05-18"))
+  ) +
+  geom_smooth(
+    method = "lm", formula = "y ~ x", colour = "grey20",
+    data = filter(violence_counts, 
+                  as_date(week) >= ymd("2015-05-18"))
+  ) +
+  annotate("text", x = ymd("2015-04-01"), y = 32, hjust = 1, 
+           size = 3.2, lineheight = 0.9,
+           label = "beginning of the\nNCO initiative") +
+  scale_y_continuous(limits = c(0, NA)) +
+  facet_grid(
+    cols = vars(group), 
+    labeller = as_labeller(function (x) paste(x, "precincts"))
+  ) + 
+  labs(x = NULL, y = NULL) +
+  theme_minimal() +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    legend.position = "none"
+  )
+```
+
+```{r save priortrends}
+ggsave("figure_14-s2.eps", width = 7, height = 7 * 0.6, units = "in")
+ggsave("figure_14-s2.pdf", width = 7, height = 7 * 0.6, units = "in")
+```
+
+There are several different statistical models that we can use to implement the DiD approach. We could, for example, use generalized least squares (GLS) regression with correlated errors [@Faraway:2014aa]. Since the weekly counts of crime are approximately normally distributed, the simplest approach is to run a linear regression and then adjust the standard errors so that we can draw inferences from the results even though the serial autocorrelation in the data violates one of the model assumptions.
+
+The DiD approach uses the interaction between two terms in a regression model to estimate the means of four groups of weekly counts. For this example, we will not include any other terms in the model. If we suspected there was a difference in effect over time, or seasonal variation in crime, we could include additional variables to account for those patterns.
+
+```r
+vio_model <- lm(n ~ group * initiative, data = violence_counts)
+
+broom::tidy(vio_model) %>% 
+  mutate_at(vars(estimate, std.error, statistic), scales::number) %>% 
+  mutate(p.value = scales::pvalue(p.value)) %>% 
+  knitr::kable(booktabs = TRUE, align = "lrrrr")
+```
+
+```{r vio-model, include=TRUE}
+# the code in this block should be the same as in the block 
+# above, except for the table caption!
+vio_model <- lm(n ~ group * initiative, data = violence_counts)
+
+broom::tidy(vio_model) %>% 
+  mutate_at(vars(estimate, std.error, statistic), scales::number) %>% 
+  mutate(p.value = scales::pvalue(p.value)) %>% 
+  knitr::kable(booktabs = TRUE, align = "lrrrr", 
+               caption = "Difference-in-difference model results before adjusting standard errors")
+```
+
+We can interpret the co-efficients (Table \@ref(tab:vio-model)) as follows:
+
+  * the model intercept is the mean number of crimes per week in the comparison precincts before the initiative began,
+  * the `groupinitiative` co-efficient is the difference between the pre-initiative mean in the comparison and initiative precincts,
+  * the `initiativeTRUE` co-efficient is the difference between the pre- and post-initiative means in the comparison precincts, and
+  * the `groupinitiative:initiativeTRUE` interaction co-efficient is the difference between the post-intervention mean in the comparison and initiative precincts, independent of (i.e. minus) the pre-intervention difference between groups. It is the interpretation of this final co-efficient that is central to DiD analysis.
+  
+We can use the `NeweyWest()` function from the `sandwich` package [@Zeileis:2004aa] and the `coeftest()` function from the `lmtest` package to calculate standard errors and associated $p$-values adjusted for autocorrelation [@Zeileis:2002aa].
+
+```r
+lmtest::coeftest(vio_model, vcov = sandwich::NeweyWest(vio_model)) %>% 
+  broom::tidy() %>% 
+  mutate_at(vars(estimate, std.error, statistic), scales::number) %>% 
+  mutate(p.value = scales::pvalue(p.value)) %>% 
+  knitr::kable(booktabs = TRUE, align = "lrrrr")
+```
+
+```{r vio-model-adj, include=TRUE}
+# the code in this block should be the same as in the block 
+# above, except for the table caption!
+lmtest::coeftest(vio_model, vcov = sandwich::NeweyWest(vio_model)) %>% 
+  broom::tidy() %>% 
+  mutate_at(vars(estimate, std.error, statistic), scales::number) %>% 
+  mutate(p.value = scales::pvalue(p.value)) %>% 
+  knitr::kable(booktabs = TRUE, align = "lrrrr", 
+               caption = "Difference-in-difference model results after adjusting standard errors")
+```
+
+The results of this adjustment are shown in Table \@ref(tab:vio-model-adj). They show that there were about `r number_to_text(vio_model$coefficients["(Intercept)"])` offenses of serious violence per week across the four comparison precincts before the intervention began (the model intercept), with the pre-intervention difference between the comparison and NCOs precincts (the `groupinitiative` term) not being significantly different. There was no significant difference in the frequency of serious assaults in the comparison precincts pre- and post-initiative (the `initiativeTRUE` term), but there was an increase of about `r number_to_text(round(vio_model$coefficients["groupinitiative:initiativeTRUE"]))` assaults per week associated with the post-intervention difference between precinct groups, independent of the pre-intervention difference. This is contrary to the objective of the initiative, which was to reduce crime.
+
+The purpose of this example is not to evalute the NCO program, but to illustrate the process of identifying changes in crime over time. Obtaining a full answer to the question of whether the introduction of NCOs was associated with any change in the frequency of serious violence would need to consider whether there was any change in effect over time (e.g. if NCOs took time to become effective) and whether there was any variation between pilot precincts. A more-detailed analysis should also consider how to choose the best comparison precincts. Nevertheless, this simple example illustrates some of the issues involved in handling temporal data when studying crime and place.
+
+
+
+# Availability of materials
+
+The R code used to produce the charts in this document and the associated book chapter is available at `https://osf.io/j5zth/`
+
+
+
+# References
+
